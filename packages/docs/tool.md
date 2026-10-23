@@ -86,7 +86,8 @@ embedding-atlas path_to_dataset.parquet --vector embedding --probe category
 
 The tool trains a logistic regression classifier (a linear probe) that predicts the attribute from the original high-dimensional vectors, and prints its accuracy, macro-F1, majority-class baseline, and per-class precision and recall.
 Each labeled row is predicted by a model that was not trained on it (stratified 5-fold cross-validation), so the predictions are held-out estimates.
-Rows with missing labels, and classes with fewer than 5 labeled rows, are excluded from training and evaluation.
+Rows are assigned to folds by their embedding vectors, so the results don't depend on the order of the rows, and duplicate vectors are never split between training and evaluation.
+Rows with missing labels, and classes with fewer than 5 distinct labeled vectors, are excluded from training and evaluation.
 
 The predictions are added as the columns `probe_<column>_pred`, `probe_<column>_correct` (`correct`, `incorrect`, or `excluded`), and `probe_<column>_confidence` (the probability of the predicted class).
 You can color the embedding view by these columns, and filter by them to explore where the probe performs poorly.

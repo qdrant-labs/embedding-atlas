@@ -11,10 +11,15 @@ that never saw it (stratified k-fold out-of-fold predictions). The per-row
 correctness can therefore be aggregated over any subset of rows (e.g., a
 selection in the embedding view) and still be a held-out estimate.
 
+Folds are assigned from a hash of each vector rather than its row position, so
+results don't depend on row order, and duplicate vectors always share a fold
+(they can't leak between training and held-out rows).
+
 - Core function: :func:`probe`
 - DataFrame entry point: :func:`compute_probe_columns`
 """
 
+import hashlib
 import warnings
 from dataclasses import dataclass, field
 
@@ -108,6 +113,33 @@ def _make_model(C: float):
     return make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
 
 
+def _vector_keys(vectors: np.ndarray, random_state: int) -> np.ndarray:
+    """Seeded 64-bit hash of each vector's contents, as a uint64 array."""
+    salt = random_state.to_bytes(8, "little", signed=True)
+    digests = b"".join(
+        hashlib.blake2b(v.tobytes(), digest_size=8, salt=salt).digest() for v in vectors
+    )
+    return np.frombuffer(digests, dtype=np.uint64)
+
+
+def _assign_folds(keys: np.ndarray, y: np.ndarray, n_folds: int) -> np.ndarray:
+    """
+    Assign rows to folds from their vector keys, independently of row order.
+
+    Rows with the same key (identical vectors) form a group that shares a fold.
+    Groups are ordered by class, then by key (pseudo-random), and dealt to folds
+    round-robin, so every class is spread evenly across folds.
+    """
+    unique_keys, inverse = np.unique(keys, return_inverse=True)
+    # A group with mixed labels is stratified by its smallest class index.
+    group_class = np.full(len(unique_keys), np.iinfo(np.int64).max)
+    np.minimum.at(group_class, inverse, y)
+    order = np.lexsort((unique_keys, group_class))
+    group_fold = np.empty(len(unique_keys), dtype=np.int64)
+    group_fold[order] = np.arange(len(order)) % n_folds
+    return group_fold[inverse]
+
+
 def probe(
     vectors: np.ndarray,
     labels: pd.Series | list,
@@ -124,8 +156,11 @@ def probe(
     Train and evaluate a logistic regression probe from vectors to labels.
 
     Rows with a missing label, or whose class has fewer than ``min_class_count``
-    labeled rows, are excluded from training and evaluation; they still receive a
-    prediction from a model trained on all evaluated rows.
+    distinct labeled vectors, are excluded from training and evaluation; they still
+    receive a prediction from a model trained on all evaluated rows.
+
+    Results are reproducible and independent of row order: folds are assigned
+    from a seeded hash of each vector, and identical vectors share a fold.
 
     Args:
         vectors: Array of shape (N, D), the original embedding vectors.
@@ -133,7 +168,8 @@ def probe(
         has_vector: Optional boolean mask of shape (N,). Rows where it is False
             are ignored (their entries in ``vectors`` can be arbitrary).
         n_folds: Number of stratified folds for out-of-fold predictions.
-        min_class_count: Minimum number of labeled rows for a class to be kept.
+        min_class_count: Minimum number of distinct labeled vectors for a class
+            to be kept (at least ``n_folds``).
         max_classes: Maximum number of (kept) classes.
         min_rows: Minimum number of evaluated rows.
         C: Inverse regularization strength of the logistic regression.
@@ -152,7 +188,6 @@ def probe(
         f1_score,
         precision_recall_fscore_support,
     )
-    from sklearn.model_selection import StratifiedKFold
 
     vectors = np.asarray(vectors, dtype=np.float32)
     labels = _normalize_labels(pd.Series(labels).reset_index(drop=True))
@@ -165,11 +200,18 @@ def probe(
         has_vector = np.ones(n, dtype=bool)
 
     labeled = has_vector & np.array([v is not None for v in labels])
-    counts = pd.Series(labels[labeled]).value_counts()
+    keys = np.zeros(n, dtype=np.uint64)
+    keys[labeled] = _vector_keys(vectors[labeled], random_state)
+    labeled_rows = pd.DataFrame({"label": labels[labeled], "key": keys[labeled]})
+    counts = labeled_rows["label"].value_counts()
+    # Duplicate vectors share a fold, so count distinct vectors per class.
+    distinct_counts = labeled_rows.groupby("label")["key"].nunique()
     min_class_count = max(min_class_count, n_folds)
-    classes = sorted(c for c, k in counts.items() if k >= min_class_count)
+    classes = sorted(c for c, k in distinct_counts.items() if k >= min_class_count)
     excluded_classes = {
-        str(c): int(k) for c, k in counts.items() if k < min_class_count
+        str(c): int(counts[c])
+        for c, k in distinct_counts.items()
+        if k < min_class_count
     }
     if len(classes) < 2:
         raise ValueError(
@@ -188,21 +230,32 @@ def probe(
     if n_evaluated < min_rows:
         raise ValueError(f"need at least {min_rows} labeled rows, found {n_evaluated}")
 
-    x = vectors[evaluated]
-    y = np.array([class_index[v] for v in labels[evaluated]])
+    # Train on the evaluated rows in a canonical order (by vector key, then class),
+    # since the solver's floating-point results depend slightly on row order.
+    rows = np.flatnonzero(evaluated)
+    row_classes = np.array([class_index[v] for v in labels[rows]])
+    canonical = np.lexsort((row_classes, keys[rows]))
+    rows, row_classes = rows[canonical], row_classes[canonical]
+    x = vectors[rows]
+    y = row_classes
     k = len(classes)
 
     # Out-of-fold predictions: every evaluated row is predicted by a model
     # trained on the other folds.
     proba = np.zeros((n_evaluated, k), dtype=np.float64)
     baseline_hits = 0
-    folds = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    folds = _assign_folds(keys[rows], y, n_folds)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)
-        for train, test in folds.split(x, y):
+        for fold in range(n_folds):
+            test = folds == fold
+            train = ~test
+            if not test.any():
+                continue
             model = _make_model(C).fit(x[train], y[train])
-            # Each class has >= n_folds rows, so every training fold has all classes.
-            proba[test] = model.predict_proba(x[test])
+            # Map the model's classes to columns, in case a class is missing from
+            # this training fold (only possible with mixed-label duplicates).
+            proba[np.ix_(test, model.classes_)] = model.predict_proba(x[test])
             majority = np.bincount(y[train], minlength=k).argmax()
             baseline_hits += int(np.sum(y[test] == majority))
 
@@ -224,9 +277,9 @@ def probe(
     predicted = np.full(n, None, dtype=object)
     confidence = np.full(n, np.nan, dtype=np.float64)
     correct = np.full(n, EXCLUDED, dtype=object)
-    predicted[evaluated] = class_names[y_pred]
-    confidence[evaluated] = proba.max(axis=1)
-    correct[evaluated] = np.where(y_pred == y, CORRECT, INCORRECT)
+    predicted[rows] = class_names[y_pred]
+    confidence[rows] = proba.max(axis=1)
+    correct[rows] = np.where(y_pred == y, CORRECT, INCORRECT)
     if others_proba is not None:
         predicted[others] = class_names[others_proba.argmax(axis=1)]
         confidence[others] = others_proba.max(axis=1)

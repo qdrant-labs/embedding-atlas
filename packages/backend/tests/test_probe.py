@@ -77,6 +77,35 @@ class TestEvaluation:
         assert np.array_equal(a.predicted, b.predicted)
         assert np.array_equal(a.confidence, b.confidence)
 
+    def test_independent_of_row_order(self):
+        vectors, labels = make_blobs(spread=6.0)
+        a = probe(vectors, labels)
+        perm = np.random.default_rng(3).permutation(len(labels))
+        b = probe(vectors[perm], labels[perm])
+        assert a.report() == b.report()
+        assert np.array_equal(a.predicted[perm], b.predicted)
+        assert np.array_equal(a.correct[perm], b.correct)
+        assert np.array_equal(a.confidence[perm], b.confidence)
+
+    def test_seed_changes_folds(self):
+        vectors, labels = make_blobs(spread=6.0)
+        a = probe(vectors, labels, random_state=1)
+        b = probe(vectors, labels, random_state=2)
+        assert not np.array_equal(a.confidence, b.confidence)
+
+    def test_duplicates_do_not_leak_between_folds(self):
+        """Each vector appears twice with the same random label. If copies were
+        split across folds, the model would recall the label of the training copy
+        and score near 100%; with duplicates grouped, it stays near chance."""
+        rng = np.random.default_rng(4)
+        unique = rng.normal(size=(150, 400))
+        unique_labels = rng.choice(np.array(["x", "y"], dtype=object), size=150)
+        vectors = np.concatenate([unique, unique])
+        labels = np.concatenate([unique_labels, unique_labels])
+        result = probe(vectors, labels)
+        assert result.n_evaluated == 300
+        assert result.accuracy < 0.7
+
     def test_metrics_match_per_row_outputs(self):
         vectors, labels = make_blobs(spread=6.0)
         result = probe(vectors, labels)
@@ -103,6 +132,17 @@ class TestLabels:
         assert result.excluded_classes == {"rare": 3}
         assert list(result.correct[:3]) == ["excluded"] * 3
         assert "rare" not in set(result.predicted)
+
+    def test_rare_class_counts_distinct_vectors(self):
+        """A class with enough rows but too few distinct vectors is excluded."""
+        vectors, labels = make_blobs()
+        vectors, labels = vectors.copy(), labels.copy()
+        vectors[:8] = vectors[0]
+        vectors[8:10] = vectors[8]
+        labels[:10] = "dup"
+        result = probe(vectors, labels)
+        assert result.excluded_classes == {"dup": 10}
+        assert "dup" not in result.classes
 
     def test_integer_labels(self):
         vectors, _ = make_blobs(classes=(0, 1, 2))
