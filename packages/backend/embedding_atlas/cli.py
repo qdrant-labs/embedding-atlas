@@ -271,6 +271,13 @@ def import_modules(names: list[str]):
     help="Compute the local clustering coefficient from the neighbor graph (adds a clustering column).",
 )
 @click.option(
+    "--probe",
+    "probe_targets",
+    multiple=True,
+    help="Train a linear probe that predicts the given categorical column from the --vector embeddings, "
+    "and add held-out predictions as columns (probe_<column>_pred, _correct, _confidence). Can be specified multiple times.",
+)
+@click.option(
     "--query",
     default=None,
     type=str,
@@ -430,6 +437,7 @@ def main(
     compute_degree: bool,
     compute_kcore: bool,
     compute_clustering: bool,
+    probe_targets: tuple[str, ...],
     query: str | None,
     sample: int | None,
     umap_n_neighbors: int | None,
@@ -652,6 +660,40 @@ def main(
                 "no neighbor data available."
             )
 
+    # Train linear probes from the original vectors to the requested columns.
+    chart_overrides = {}
+    if probe_targets:
+        if vector is None:
+            raise click.UsageError(
+                "--probe requires pre-computed embeddings via --vector."
+            )
+        from .probe import (
+            compute_probe_columns,
+            format_probe_report,
+            probe_confusion_chart,
+        )
+
+        for target in probe_targets:
+            logger.info(f"Training probe for {target!r}...")
+            try:
+                result = compute_probe_columns(df, vector=vector, target=target)
+            except ValueError as e:
+                raise click.BadParameter(f"{target!r}: {e}", param_hint="--probe")
+            print(format_probe_report(result, target))
+            pred_column = find_column_name(df.columns, f"probe_{target}_pred")
+            df[pred_column] = result.predicted
+            df[find_column_name(df.columns, f"probe_{target}_correct")] = result.correct
+            df[find_column_name(df.columns, f"probe_{target}_confidence")] = (
+                result.confidence
+            )
+            # Show the confusion matrix in place of the predicted column's count plot.
+            chart_overrides[pred_column] = probe_confusion_chart(
+                result,
+                target=target,
+                predicted=pred_column,
+                target_is_string=pd.api.types.is_string_dtype(df[target]),
+            )
+
     props = make_embedding_atlas_props(
         row_id=id_column,
         x=x_column,
@@ -665,6 +707,9 @@ def main(
         stop_words=stop_words_resolved,
         labels=labels_resolved,
         initial_state=initial_state,
+        default_charts_config={"override": chart_overrides}
+        if chart_overrides
+        else None,
         additional_tables=additional_tables_meta or None,
     )
 

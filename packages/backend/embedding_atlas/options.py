@@ -57,6 +57,10 @@ class EmbeddingAtlasOptions(TypedDict, total=False):
     initial_state:
         The initial Embedding Atlas state.
 
+    default_charts_config:
+        Configuration for the default charts (e.g., ``{"override": {column: chart_spec}}``).
+        Maps to ``defaultChartsConfig`` in the frontend API.
+
     additional_tables:
         Declares auxiliary tables' relation to the main table for cross-table filtering,
         as a mapping ``{name: {"id": ..., "relation": {...}}}``. This sets the ``additionalTables``
@@ -81,6 +85,8 @@ class EmbeddingAtlasOptions(TypedDict, total=False):
     stop_words: list[str] | None
 
     initial_state: dict | None
+
+    default_charts_config: dict | None
 
     additional_tables: dict | None
 
@@ -132,6 +138,9 @@ def make_embedding_atlas_props(**options: Unpack[EmbeddingAtlasOptions]) -> dict
 
     # Initial state
     set_prop("initialState", options.get("initial_state"))
+
+    # Default charts
+    set_prop("defaultChartsConfig", options.get("default_charts_config"))
 
     # Additional tables (id/relation for cross-table filtering)
     set_prop("additionalTables", options.get("additional_tables"))
