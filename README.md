@@ -1,5 +1,12 @@
 # Embedding Atlas
 
+> [!NOTE]
+> This is the Qdrant Labs fork of [Apple's Embedding Atlas](https://github.com/apple/embedding-atlas), where we try out extensions. The `main` branch matches upstream except for this note, and each experiment lives on its own branch:
+>
+> - [`feat/embedding-probe`](https://github.com/qdrant-labs/embedding-atlas/tree/feat/embedding-probe): supervised linear probes that measure how well a categorical metadata column, such as `category` or `brand`, can be predicted from the original embedding vectors. Run `embedding-atlas data.parquet --vector embedding --probe category`, then color and filter the embedding view by the probe's predictions and errors. The [probing section of the command line docs](https://github.com/qdrant-labs/embedding-atlas/blob/feat/embedding-probe/packages/docs/tool.md#probing-embeddings) on that branch has the details.
+>
+> These branches are experimental and aren't part of the upstream project or the published packages. To run one, build from source as described in the [development guide](packages/docs/develop.md). For questions, contact Francisco Losada de la Rosa.
+
 [![NPM Version](https://img.shields.io/npm/v/embedding-atlas)](https://www.npmjs.com/package/embedding-atlas)
 [![PyPI - Version](https://img.shields.io/pypi/v/embedding-atlas)](https://pypi.org/project/embedding-atlas/)
 [![Paper](https://img.shields.io/badge/paper-arXiv:2505.06386-b31b1b.svg)](https://arxiv.org/abs/2505.06386)
